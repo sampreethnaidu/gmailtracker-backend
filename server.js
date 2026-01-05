@@ -11,16 +11,18 @@ app.use(cors());
 app.use(express.json());
 
 // --- DATABASE CONNECTION ---
-if (process.env.MONGO_URI) {
-    mongoose.connect(process.env.MONGO_URI)
-        .then(() => {
-            console.log('MongoDB Connected Successfully');
-            initializeAds();
-        })
-        .catch(err => console.log('MongoDB Connection Error:', err));
-} else {
-    console.log('Waiting for Database Link in .env file...');
+// Strict check: If no DB link in cloud settings, stop the server.
+if (!process.env.MONGO_URI) {
+    console.error("FATAL ERROR: MONGO_URI is missing in Environment Variables.");
+    process.exit(1);
 }
+
+mongoose.connect(process.env.MONGO_URI)
+    .then(() => {
+        console.log('MongoDB Connected Successfully');
+        initializeAds();
+    })
+    .catch(err => console.log('MongoDB Connection Error:', err));
 
 // --- DATA MODELS ---
 
@@ -50,7 +52,7 @@ const adSchema = new mongoose.Schema({
 });
 const Ad = mongoose.model('Ad', adSchema);
 
-// --- SEED DATA (Creates a test ad if none exist) ---
+// --- SEED DATA ---
 const initializeAds = async () => {
     try {
         const count = await Ad.countDocuments();
@@ -87,8 +89,11 @@ app.post('/api/track/generate', async (req, res) => {
         });
         await newEmail.save();
         
+        // Use the Cloud URL from Environment Variables
+        const baseUrl = process.env.BASE_URL || "https://gmailtracker-backend.onrender.com";
         console.log(`Generated ID for: ${recipient}`);
-        res.json({ trackingId, pixelUrl: `http://localhost:5000/api/track/${trackingId}` });
+        
+        res.json({ trackingId, pixelUrl: `${baseUrl}/api/track/${trackingId}` });
     } catch (error) {
         console.log(error);
         res.status(500).json({ error: 'Error generating ID' });
@@ -154,7 +159,7 @@ app.get('/api/ads/serve', async (req, res) => {
     }
 });
 
-// Route 4: Check Status (Renamed for Safety)
+// Route 4: Check Status
 app.get('/api/check-status', async (req, res) => {
     try {
         const subject = req.query.subject;
