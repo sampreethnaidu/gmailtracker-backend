@@ -106,15 +106,14 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: Tracking Pixel (NO DELAY VERSION)
+// Route 2: The Tracking Pixel (Standard GIF Format)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            // REMOVED THE 2-SECOND CHECK. NOW RECORDS INSTANTLY.
-            console.log(`REAL Open: ${email.recipientEmail}`);
+            console.log(`REAL Open: ${email.recipientEmail}`); // LOG THIS
             email.opened = true;
             email.openCount += 1;
             email.openHistory.push({
@@ -125,17 +124,18 @@ app.get('/api/track/:id', async (req, res) => {
             await email.save();
         }
 
-        // Transparent 1x1 Pixel
+        // Standard 1x1 Transparent GIF Hex
         const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+        
         res.writeHead(200, {
             'Content-Type': 'image/gif',
             'Content-Length': pixel.length,
-            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0'
         });
         res.end(pixel);
         
     } catch (error) {
-        console.log(error);
+        console.log("Track Error:", error);
         res.status(500).send('Error');
     }
 });
