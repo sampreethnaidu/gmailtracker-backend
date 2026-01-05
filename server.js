@@ -6,12 +6,24 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// --- CRITICAL FIX: PERMISSIVE CORS ---
+// This tells the server: "Allow ANY website to talk to me."
+app.use(cors({
+    origin: '*', 
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Backup Manual Headers (Just in case the cors package misses something)
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    next();
+});
+
 app.use(express.json());
 
 // --- DATABASE CONNECTION ---
-// Strict check: If no DB link in cloud settings, stop the server.
 if (!process.env.MONGO_URI) {
     console.error("FATAL ERROR: MONGO_URI is missing in Environment Variables.");
     process.exit(1);
@@ -89,7 +101,6 @@ app.post('/api/track/generate', async (req, res) => {
         });
         await newEmail.save();
         
-        // Use the Cloud URL from Environment Variables
         const baseUrl = process.env.BASE_URL || "https://gmailtracker-backend.onrender.com";
         console.log(`Generated ID for: ${recipient}`);
         
@@ -163,6 +174,12 @@ app.get('/api/ads/serve', async (req, res) => {
 app.get('/api/check-status', async (req, res) => {
     try {
         const subject = req.query.subject;
+        
+        // Safety: If subject is missing or "(no subject)", don't search
+        if (!subject || subject === "(no subject)" || subject === "") {
+            return res.json({ found: false });
+        }
+
         const email = await TrackedEmail.findOne({ subject: subject }).sort({ createdAt: -1 });
         
         if (email) {
