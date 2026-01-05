@@ -6,15 +6,14 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// --- CRITICAL FIX: PERMISSIVE CORS ---
-// This tells the server: "Allow ANY website to talk to me."
+// --- CORS: Allow Gmail to talk to Server ---
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Backup Manual Headers (Just in case the cors package misses something)
+// Backup Headers
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
@@ -37,7 +36,6 @@ mongoose.connect(process.env.MONGO_URI)
     .catch(err => console.log('MongoDB Connection Error:', err));
 
 // --- DATA MODELS ---
-
 const emailSchema = new mongoose.Schema({
     trackingId: String,
     senderEmail: String,
@@ -69,7 +67,7 @@ const initializeAds = async () => {
     try {
         const count = await Ad.countDocuments();
         if (count === 0) {
-            console.log("No ads found. Creating a test ad...");
+            console.log("Creating test ad...");
             const testAd = new Ad({
                 clientName: "Test Client",
                 imageUrl: "https://dummyimage.com/180x60/000/fff&text=Ad+Space",
@@ -78,16 +76,13 @@ const initializeAds = async () => {
                 isActive: true
             });
             await testAd.save();
-            console.log("Test Ad Created!");
         }
-    } catch (err) {
-        console.log("Error creating test ad:", err);
-    }
+    } catch (err) { console.log(err); }
 };
 
 // --- API ROUTES ---
 
-// Route 1: Generate a Tracking ID
+// Route 1: Generate ID
 app.post('/api/track/generate', async (req, res) => {
     try {
         const { sender, recipient, subject } = req.body;
@@ -111,46 +106,45 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: The Tracking Pixel (DEBUG MODE: VISIBLE RED DOT)
+// Route 2: Tracking Pixel (Invisible)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            // Log it immediately
-            console.log(`REAL Open Detected for: ${email.recipientEmail}`);
+            // Ignore opens faster than 2 seconds (bots)
+            const timeSinceCreation = new Date() - new Date(email.createdAt);
             
-            email.opened = true;
-            email.openCount += 1;
-            email.openHistory.push({
-                timestamp: new Date(),
-                ip: req.ip,
-                userAgent: req.headers['user-agent']
-            });
-            await email.save();
-        } else {
-            console.log("Tracking ID not found in database.");
+            if (timeSinceCreation > 2000) {
+                console.log(`REAL Open: ${email.recipientEmail}`);
+                email.opened = true;
+                email.openCount += 1;
+                email.openHistory.push({
+                    timestamp: new Date(),
+                    ip: req.ip,
+                    userAgent: req.headers['user-agent']
+                });
+                await email.save();
+            }
         }
 
-        // Return a VISIBLE Red Square (10x10 pixels) so you can see if it loads
-        // This is a base64 encoded red GIF
-        const redPixel = Buffer.from('R0lGODlhCgAKAPAAAP8AAAAAACH5BAAAAAAALAAAAAAKAAoAAAIRhI+py+0Po5y02ouz3rz7rxQAOw==', 'base64');
-        
+        // Transparent 1x1 Pixel
+        const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         res.writeHead(200, {
             'Content-Type': 'image/gif',
-            'Content-Length': redPixel.length,
+            'Content-Length': pixel.length,
             'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
         });
-        res.end(redPixel);
+        res.end(pixel);
         
     } catch (error) {
-        console.log("Tracking Error:", error);
+        console.log(error);
         res.status(500).send('Error');
     }
 });
 
-// Route 3: Serve Ads
+// Route 3: Ads
 app.get('/api/ads/serve', async (req, res) => {
     try {
         const ad = await Ad.findOne({ 
@@ -166,17 +160,14 @@ app.get('/api/ads/serve', async (req, res) => {
             res.json({ found: false });
         }
     } catch (error) {
-        console.log(error);
         res.status(500).json({ error: 'Error serving ad' });
     }
 });
 
-// Route 4: Check Status
+// Route 4: Check Status (Enhanced)
 app.get('/api/check-status', async (req, res) => {
     try {
         const subject = req.query.subject;
-        
-        // Safety: If subject is missing or "(no subject)", don't search
         if (!subject || subject === "(no subject)" || subject === "") {
             return res.json({ found: false });
         }
@@ -188,21 +179,18 @@ app.get('/api/check-status', async (req, res) => {
                 found: true,
                 opened: email.opened,
                 openCount: email.openCount,
+                recipient: email.recipientEmail, // Added this field
                 firstOpen: email.openHistory.length > 0 ? email.openHistory[0].timestamp : null
             });
         } else {
             res.json({ found: false });
         }
     } catch (error) {
-        console.log(error);
         res.status(500).json({ error: 'Error checking status' });
     }
 });
 
-// Route 5: Health Check
-app.get('/', (req, res) => {
-    res.send('Gmail Tracker Backend is Fully Operational!');
-});
+app.get('/', (req, res) => res.send('Backend Operational'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
