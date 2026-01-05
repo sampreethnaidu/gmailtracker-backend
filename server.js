@@ -13,13 +13,6 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Backup Headers
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-    next();
-});
-
 app.use(express.json());
 
 // --- DATABASE CONNECTION ---
@@ -67,7 +60,6 @@ const initializeAds = async () => {
     try {
         const count = await Ad.countDocuments();
         if (count === 0) {
-            console.log("Creating test ad...");
             const testAd = new Ad({
                 clientName: "Test Client",
                 imageUrl: "https://dummyimage.com/180x60/000/fff&text=Ad+Space",
@@ -101,19 +93,18 @@ app.post('/api/track/generate', async (req, res) => {
         
         res.json({ trackingId, pixelUrl: `${baseUrl}/api/track/${trackingId}` });
     } catch (error) {
-        console.log(error);
         res.status(500).json({ error: 'Error generating ID' });
     }
 });
 
-// Route 2: The Tracking Pixel (Standard GIF Format)
+// Route 2: Tracking Pixel (INSTANT - NO DELAY)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            console.log(`REAL Open: ${email.recipientEmail}`); // LOG THIS
+            console.log(`REAL Open: ${email.recipientEmail}`); // Look for this in logs!
             email.opened = true;
             email.openCount += 1;
             email.openHistory.push({
@@ -124,7 +115,7 @@ app.get('/api/track/:id', async (req, res) => {
             await email.save();
         }
 
-        // Standard 1x1 Transparent GIF Hex
+        // Standard 1x1 Transparent GIF (Bypasses some filters)
         const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         
         res.writeHead(200, {
