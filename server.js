@@ -106,27 +106,23 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: Tracking Pixel (Invisible)
+// Route 2: Tracking Pixel (NO DELAY VERSION)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            // Ignore opens faster than 2 seconds (bots)
-            const timeSinceCreation = new Date() - new Date(email.createdAt);
-            
-            if (timeSinceCreation > 2000) {
-                console.log(`REAL Open: ${email.recipientEmail}`);
-                email.opened = true;
-                email.openCount += 1;
-                email.openHistory.push({
-                    timestamp: new Date(),
-                    ip: req.ip,
-                    userAgent: req.headers['user-agent']
-                });
-                await email.save();
-            }
+            // REMOVED THE 2-SECOND CHECK. NOW RECORDS INSTANTLY.
+            console.log(`REAL Open: ${email.recipientEmail}`);
+            email.opened = true;
+            email.openCount += 1;
+            email.openHistory.push({
+                timestamp: new Date(),
+                ip: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+            await email.save();
         }
 
         // Transparent 1x1 Pixel
@@ -164,7 +160,7 @@ app.get('/api/ads/serve', async (req, res) => {
     }
 });
 
-// Route 4: Check Status (Enhanced)
+// Route 4: Check Status
 app.get('/api/check-status', async (req, res) => {
     try {
         const subject = req.query.subject;
@@ -179,7 +175,7 @@ app.get('/api/check-status', async (req, res) => {
                 found: true,
                 opened: email.opened,
                 openCount: email.openCount,
-                recipient: email.recipientEmail, // Added this field
+                recipient: email.recipientEmail,
                 firstOpen: email.openHistory.length > 0 ? email.openHistory[0].timestamp : null
             });
         } else {
