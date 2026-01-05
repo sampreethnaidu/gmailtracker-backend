@@ -111,40 +111,41 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: The Tracking Pixel
+// Route 2: The Tracking Pixel (DEBUG MODE: VISIBLE RED DOT)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            // Backup Safety: Ignore opens within 5 seconds just in case blocker fails
-            const timeSinceCreation = new Date() - new Date(email.createdAt);
+            // Log it immediately
+            console.log(`REAL Open Detected for: ${email.recipientEmail}`);
             
-            if (timeSinceCreation < 5000) {
-                console.log(`Ignored immediate open for ${email.recipientEmail}`);
-            } else {
-                console.log(`REAL Open: ${email.recipientEmail}`);
-                email.opened = true;
-                email.openCount += 1;
-                email.openHistory.push({
-                    timestamp: new Date(),
-                    ip: req.ip,
-                    userAgent: req.headers['user-agent']
-                });
-                await email.save();
-            }
+            email.opened = true;
+            email.openCount += 1;
+            email.openHistory.push({
+                timestamp: new Date(),
+                ip: req.ip,
+                userAgent: req.headers['user-agent']
+            });
+            await email.save();
+        } else {
+            console.log("Tracking ID not found in database.");
         }
 
-        const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+        // Return a VISIBLE Red Square (10x10 pixels) so you can see if it loads
+        // This is a base64 encoded red GIF
+        const redPixel = Buffer.from('R0lGODlhCgAKAPAAAP8AAAAAACH5BAAAAAAALAAAAAAKAAoAAAIRhI+py+0Po5y02ouz3rz7rxQAOw==', 'base64');
+        
         res.writeHead(200, {
             'Content-Type': 'image/gif',
-            'Content-Length': pixel.length
+            'Content-Length': redPixel.length,
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
         });
-        res.end(pixel);
+        res.end(redPixel);
         
     } catch (error) {
-        console.log(error);
+        console.log("Tracking Error:", error);
         res.status(500).send('Error');
     }
 });
