@@ -60,6 +60,7 @@ const initializeAds = async () => {
     try {
         const count = await Ad.countDocuments();
         if (count === 0) {
+            console.log("Creating test ad...");
             const testAd = new Ad({
                 clientName: "Test Client",
                 imageUrl: "https://dummyimage.com/180x60/000/fff&text=Ad+Space",
@@ -97,14 +98,14 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: Tracking Pixel (INSTANT - NO DELAY)
+// Route 2: Tracking Pixel (Anti-Cache + Spacer Mode)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            console.log(`REAL Open: ${email.recipientEmail}`); // Look for this in logs!
+            console.log(`REAL Open Detected: ${email.recipientEmail}`);
             email.opened = true;
             email.openCount += 1;
             email.openHistory.push({
@@ -115,13 +116,17 @@ app.get('/api/track/:id', async (req, res) => {
             await email.save();
         }
 
-        // Standard 1x1 Transparent GIF (Bypasses some filters)
-        const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+        // 5x5 Transparent GIF (Looks like a layout spacer, not a tracker)
+        const pixel = Buffer.from('R0lGODlhBQAFAIAAAAAAAP///yH5BAEAAAAALAAAAAAFAAUAAAIHhI+py+1dAAA7', 'base64');
         
         res.writeHead(200, {
             'Content-Type': 'image/gif',
             'Content-Length': pixel.length,
-            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0'
+            // AGGRESSIVE NO-CACHE HEADERS
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Surrogate-Control': 'no-store'
         });
         res.end(pixel);
         
