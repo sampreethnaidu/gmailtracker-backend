@@ -6,7 +6,6 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// --- CORS: Allow Gmail to talk to Server ---
 app.use(cors({
     origin: '*', 
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -17,7 +16,7 @@ app.use(express.json());
 
 // --- DATABASE CONNECTION ---
 if (!process.env.MONGO_URI) {
-    console.error("FATAL ERROR: MONGO_URI is missing in Environment Variables.");
+    console.error("FATAL ERROR: MONGO_URI is missing.");
     process.exit(1);
 }
 
@@ -32,7 +31,7 @@ mongoose.connect(process.env.MONGO_URI)
 const emailSchema = new mongoose.Schema({
     trackingId: String,
     senderEmail: String,
-    recipientEmail: String,
+    recipientEmail: String, // Stores "a@gmail.com, b@gmail.com"
     subject: String,
     opened: { type: Boolean, default: false },
     openCount: { type: Number, default: 0 },
@@ -98,14 +97,14 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: Tracking Pixel (Anti-Cache + Spacer Mode)
+// Route 2: Tracking Pixel (Spacer Mode - Anti-Spam)
 app.get('/api/track/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const email = await TrackedEmail.findOne({ trackingId: trackingId });
         
         if (email) {
-            console.log(`REAL Open Detected: ${email.recipientEmail}`);
+            console.log(`REAL Open: ${email.recipientEmail}`);
             email.opened = true;
             email.openCount += 1;
             email.openHistory.push({
@@ -116,13 +115,12 @@ app.get('/api/track/:id', async (req, res) => {
             await email.save();
         }
 
-        // 5x5 Transparent GIF (Looks like a layout spacer, not a tracker)
+        // 5x5 Transparent GIF (Looks like a layout spacer)
         const pixel = Buffer.from('R0lGODlhBQAFAIAAAAAAAP///yH5BAEAAAAALAAAAAAFAAUAAAIHhI+py+1dAAA7', 'base64');
         
         res.writeHead(200, {
             'Content-Type': 'image/gif',
             'Content-Length': pixel.length,
-            // AGGRESSIVE NO-CACHE HEADERS
             'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
             'Pragma': 'no-cache',
             'Expires': '0',
