@@ -212,17 +212,48 @@ app.get('/api/check-status', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Serve Ads (Smart Logic)
+// 4. Serve Ads (Smart Random Rotation)
 app.get('/api/ads/serve', async (req, res) => {
     try {
-        let ad = await Ad.findOne({ isActive: true, clientName: { $ne: "VITSN Innovations" }, $expr: { $lt: ["$currentViews", "$maxViews"] } });
-        if (!ad) ad = await Ad.findOne({ clientName: "VITSN Innovations" });
+        // Step 1: Find ALL eligible paying ads (Active + Has Views Left)
+        // We use 'aggregate' and '$sample' to pick ONE random winner
+        const randomAds = await Ad.aggregate([
+            { 
+                $match: { 
+                    isActive: true, 
+                    clientName: { $ne: "VITSN Innovations" }, 
+                    $expr: { $lt: ["$currentViews", "$maxViews"] } 
+                } 
+            },
+            { $sample: { size: 1 } } // <--- THE MAGIC: Picks 1 random ad
+        ]);
+
+        let ad = randomAds[0];
+
+        // Step 2: Fallback to VITSN Default if no paying ads exist
+        if (!ad) {
+            ad = await Ad.findOne({ clientName: "VITSN Innovations" });
+        }
 
         if (ad) {
-            if (ad.clientName !== "VITSN Innovations") { ad.currentViews += 1; await ad.save(); }
-            res.json({ found: true, clientName: ad.clientName, imageUrl: ad.imageUrl });
-        } else {
-            res.json({ found: true, clientName: "VITSN Innovations", imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations" });
+            // Only count views for paying clients
+            if (ad.clientName !== "VITSN Innovations") {
+                // Since 'aggregate' returns a plain object, we must re-fetch to save
+                await Ad.updateOne({ _id: ad._id }, { $inc: { currentViews: 1 } });
+            }
+            
+            res.json({ 
+                found: true, 
+                clientName: ad.clientName, 
+                imageUrl: ad.imageUrl 
+            });
+        } else { 
+            // Absolute Safety Net
+            res.json({ 
+                found: true, 
+                clientName: "VITSN Innovations",
+                imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations"
+            }); 
         }
     } catch (error) { res.status(500).json({ error: 'Error serving ad' }); }
 });
