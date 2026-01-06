@@ -1,3 +1,4 @@
+/* server.js - Final Version */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -19,12 +20,10 @@ mongoose.connect(process.env.MONGO_URI)
     .catch(err => console.log('DB Error:', err));
 
 // --- SCHEMAS ---
-
-// 1. Email Tracking Schema
 const emailSchema = new mongoose.Schema({
     trackingId: String,
     senderEmail: String,
-    recipientEmails: [String], // Array to store To, CC, BCC
+    recipientEmails: [String],
     subject: String,
     opened: { type: Boolean, default: false },
     openCount: { type: Number, default: 0 },
@@ -32,26 +31,15 @@ const emailSchema = new mongoose.Schema({
         timestamp: { type: Date, default: Date.now },
         ip: String,
         userAgent: String,
-        location: String // Placeholder for IP geolocation
+        location: String
     }],
     createdAt: { type: Date, default: Date.now }
 });
 const TrackedEmail = mongoose.model('TrackedEmail', emailSchema);
 
-// 2. User Schema (For Plans & Ad Clients)
-const userSchema = new mongoose.Schema({
-    email: { type: String, unique: true },
-    plan: { type: String, enum: ['free', 'premium'], default: 'free' },
-    isAdClient: { type: Boolean, default: false },
-    adPlan: { type: String, enum: ['none', 'basic', 'premium', 'ultra'], default: 'none' },
-    createdAt: { type: Date, default: Date.now }
-});
-const User = mongoose.model('User', userSchema);
-
-// 3. Ad Schema (Content from Cloud)
 const adSchema = new mongoose.Schema({
     clientName: String,
-    imageUrl: String, // The ad image
+    imageUrl: String,
     targetPlan: { type: String, enum: ['basic', 'premium', 'ultra'] }, 
     maxViews: Number,
     currentViews: { type: Number, default: 0 },
@@ -77,26 +65,27 @@ const initializeDefaults = async () => {
 
 // --- ROUTES ---
 
-// Route 1: Generate Tracking ID (Called when you click Send)
+// Route 1: Generate Tracking ID (Updated to accept Client ID)
 app.post('/api/track/generate', async (req, res) => {
     try {
-        const { sender, recipients, subject } = req.body;
-        const trackingId = uuidv4();
+        // We now accept 'trackingId' from the extension if provided
+        const { sender, recipients, subject, trackingId } = req.body;
+        
+        // Use the extension's ID, or fallback to a new one
+        const finalId = trackingId || uuidv4();
         
         await new TrackedEmail({ 
-            trackingId, 
+            trackingId: finalId, 
             senderEmail: sender, 
             recipientEmails: recipients, 
             subject 
         }).save();
         
-        // IMPORTANT: Change this to your actual Render URL when deploying
         const baseUrl = process.env.BASE_URL || "https://gmailtracker-backend.onrender.com"; 
         
         res.json({ 
-            trackingId, 
-            // This is the INVISIBLE PIXEL the recipient gets
-            pixelUrl: `${baseUrl}/api/track-image/${trackingId}` 
+            trackingId: finalId, 
+            pixelUrl: `${baseUrl}/api/track-image/${finalId}` 
         });
     } catch (error) { 
         console.error(error);
@@ -104,35 +93,36 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: THE TRACKING PIXEL (With Bot Filter)
+// Route 2: THE TRACKING PIXEL (Updated to ALLOW Gmail Proxy)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const userAgent = req.headers['user-agent'] || '';
         const ip = req.ip;
 
-        // --- BOT FILTERING LOGIC ---
-        // If these words appear in User-Agent, it is NOT a human.
-        const isBot = /GoogleImageProxy|Gmail|YahooMailProxy|bot|crawler|spider|facebookexternalhit/i.test(userAgent);
+        // --- UPDATED BOT FILTER ---
+        // REMOVED: GoogleImageProxy, Gmail, YahooMailProxy
+        // We only block actual scrapers/crawlers now.
+        const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
 
         if (!isBot) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
             if (email) {
-                console.log(`REAL HUMAN OPEN: ${email.subject}`);
+                console.log(`REAL OPEN DETECTED: ${email.subject}`);
                 email.opened = true;
                 email.openCount += 1;
                 email.openHistory.push({ 
                     timestamp: new Date(), 
-                    ip: ip, 
+                    ip: ip, // Note: This will be Google's Proxy IP
                     userAgent: userAgent 
                 });
                 await email.save();
             }
         } else {
-            console.log(`BOT IGNORED: ${userAgent}`);
+            console.log(`BOT BLOCKED: ${userAgent}`);
         }
 
-        // Always serve a transparent 1x1 pixel
+        // Always serve the transparent pixel
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         res.writeHead(200, {
             'Content-Type': 'image/gif',
@@ -144,10 +134,9 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Route 3: Serve Ads (For the Extension Footer ONLY)
+// Route 3: Serve Ads
 app.get('/api/ads/serve', async (req, res) => {
     try {
-        // Find an active ad that hasn't reached its view limit
         const ad = await Ad.findOne({ 
             isActive: true, 
             $expr: { $lt: ["$currentViews", "$maxViews"] } 
@@ -163,12 +152,13 @@ app.get('/api/ads/serve', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Route 4: Status Check (For the Green Ticks in Gmail)
+// Route 4: Status Check
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject } = req.query;
         if (!subject) return res.json({ found: false });
 
+        // Find the most recent email with this subject
         const email = await TrackedEmail.findOne({ subject: subject }).sort({ createdAt: -1 });
         
         if (email) {
@@ -176,7 +166,7 @@ app.get('/api/check-status', async (req, res) => {
                 found: true,
                 opened: email.opened,
                 openCount: email.openCount,
-                recipient: email.recipientEmails[0], // Show first recipient
+                recipient: email.recipientEmails[0], 
                 firstOpen: email.openHistory.length > 0 ? email.openHistory[0].timestamp : null
             });
         } else { res.json({ found: false }); }
