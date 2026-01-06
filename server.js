@@ -1,4 +1,4 @@
-/* server.js - Final Version */
+/* server.js - Final Version (History Fix) */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -65,13 +65,10 @@ const initializeDefaults = async () => {
 
 // --- ROUTES ---
 
-// Route 1: Generate Tracking ID (Updated to accept Client ID)
+// Route 1: Generate Tracking ID
 app.post('/api/track/generate', async (req, res) => {
     try {
-        // We now accept 'trackingId' from the extension if provided
         const { sender, recipients, subject, trackingId } = req.body;
-        
-        // Use the extension's ID, or fallback to a new one
         const finalId = trackingId || uuidv4();
         
         await new TrackedEmail({ 
@@ -93,16 +90,13 @@ app.post('/api/track/generate', async (req, res) => {
     }
 });
 
-// Route 2: THE TRACKING PIXEL (Updated to ALLOW Gmail Proxy)
+// Route 2: THE TRACKING PIXEL
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const userAgent = req.headers['user-agent'] || '';
         const ip = req.ip;
 
-        // --- UPDATED BOT FILTER ---
-        // REMOVED: GoogleImageProxy, Gmail, YahooMailProxy
-        // We only block actual scrapers/crawlers now.
         const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
 
         if (!isBot) {
@@ -113,7 +107,7 @@ app.get('/api/track-image/:id', async (req, res) => {
                 email.openCount += 1;
                 email.openHistory.push({ 
                     timestamp: new Date(), 
-                    ip: ip, // Note: This will be Google's Proxy IP
+                    ip: ip, 
                     userAgent: userAgent 
                 });
                 await email.save();
@@ -122,7 +116,6 @@ app.get('/api/track-image/:id', async (req, res) => {
             console.log(`BOT BLOCKED: ${userAgent}`);
         }
 
-        // Always serve the transparent pixel
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         res.writeHead(200, {
             'Content-Type': 'image/gif',
@@ -152,13 +145,12 @@ app.get('/api/ads/serve', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Route 4: Status Check
+// Route 4: Status Check (FIXED HERE)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject } = req.query;
         if (!subject) return res.json({ found: false });
 
-        // Find the most recent email with this subject
         const email = await TrackedEmail.findOne({ subject: subject }).sort({ createdAt: -1 });
         
         if (email) {
@@ -166,7 +158,12 @@ app.get('/api/check-status', async (req, res) => {
                 found: true,
                 opened: email.opened,
                 openCount: email.openCount,
-                recipient: email.recipientEmails[0], 
+                recipient: email.recipientEmails[0],
+                
+                // --- THE MISSING LINE IS ADDED BELOW ---
+                openHistory: email.openHistory, 
+                // ---------------------------------------
+
                 firstOpen: email.openHistory.length > 0 ? email.openHistory[0].timestamp : null
             });
         } else { res.json({ found: false }); }
