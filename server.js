@@ -1,4 +1,4 @@
-/* server.js - Final Commercial Edition (Auth + History + Ads + Admin) */
+/* server.js - Final Commercial Edition (Auth + History + Ads + Admin + Cookie Guard) */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -6,12 +6,15 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs'); // Security: For password hashing
 const jwt = require('jsonwebtoken'); // Security: For login tokens
+const cookieParser = require('cookie-parser'); // NEW: For Sender Protection
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; // Change this in production
 
+// CORS: Updated to allow credentials (cookies) if needed in future
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
+app.use(cookieParser()); // NEW: Enable Cookie Parsing middleware
 
 // --- DATABASE CONNECTION ---
 if (!process.env.MONGO_URI) { console.error("FATAL: MONGO_URI missing."); process.exit(1); }
@@ -169,7 +172,7 @@ app.post('/api/track/generate', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
-// Tracking Pixel
+// Tracking Pixel (UPDATED FOR SENDER PROTECTION)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
@@ -177,16 +180,26 @@ app.get('/api/track-image/:id', async (req, res) => {
         const ip = req.ip;
         const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
 
-        if (!isBot) {
+        // 1. CHECK SENDER COOKIE (New Logic)
+        // If the cookie "vitsn_sender" is "true", we know this request is from the Sender.
+        // We will IGNORE the count update but still return the image.
+        const isSender = req.cookies['vitsn_sender'] === 'true';
+
+        if (!isBot && !isSender) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
             if (email) {
-                console.log(`REAL OPEN: ${email.subject}`);
+                console.log(`REAL OPEN: ${email.subject} (Viewer: Recipient)`);
                 email.opened = true;
                 email.openCount += 1;
                 email.openHistory.push({ timestamp: new Date(), ip: ip, userAgent: userAgent });
                 await email.save();
             }
+        } else if (isSender) {
+            console.log(`IGNORED OPEN: ${trackingId} (Viewer: Sender)`);
         }
+
+        // 2. ALWAYS Return the Invisible Pixel
+        // This prevents the "Broken Image" icon in Gmail for everyone.
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': img.length, 'Cache-Control': 'no-cache, no-store, must-revalidate' });
         res.end(img);
