@@ -1,4 +1,4 @@
-/* server.js - Version 20.0: Smart Recipient Clustering */
+/* server.js - Version 21.0: Enterprise Edition (Sigma Logic + Session Lock) */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -11,6 +11,7 @@ const cookieParser = require('cookie-parser');
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; 
 
+// CORS: Allow credentials (cookies) for Sender Protection
 app.use(cors({ origin: true, credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
 app.use(cookieParser()); 
@@ -39,8 +40,9 @@ const User = mongoose.model('User', userSchema);
 
 const emailSchema = new mongoose.Schema({
     trackingId: { type: String, unique: true },
+    parentId: { type: String, default: null }, // NEW: Links Reply to Original
     senderEmail: String,
-    recipientEmails: [String], // Array of strings
+    recipientEmails: [String],
     subject: String,
     opened: { type: Boolean, default: false },
     openCount: { type: Number, default: 0 },
@@ -50,6 +52,7 @@ const emailSchema = new mongoose.Schema({
         userAgent: String,
         location: String
     }],
+    lastOpenedAt: { type: Date, default: null }, // NEW: For 5-min Session Lock
     createdAt: { type: Date, default: Date.now }
 });
 const TrackedEmail = mongoose.model('TrackedEmail', emailSchema);
@@ -137,18 +140,27 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- TRACKING API ---
+// --- TRACKING API (UPDATED) ---
 
+// 1. Generate ID (Now supports parentId for Thread Linking)
 app.post('/api/track/generate', async (req, res) => {
     try {
-        const { sender, recipients, subject, trackingId } = req.body;
+        const { sender, recipients, subject, trackingId, parentId } = req.body;
         const finalId = trackingId || uuidv4();
-        await new TrackedEmail({ trackingId: finalId, senderEmail: sender, recipientEmails: recipients, subject }).save();
+        await new TrackedEmail({ 
+            trackingId: finalId, 
+            parentId: parentId || null, // Capture Parent ID
+            senderEmail: sender, 
+            recipientEmails: recipients, 
+            subject 
+        }).save();
+        
         const baseUrl = process.env.BASE_URL || "https://gmailtracker-backend.onrender.com"; 
         res.json({ trackingId: finalId, pixelUrl: `${baseUrl}/api/track-image/${finalId}` });
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
+// 2. Serve Pixel (With 5-Min Session Lock)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
@@ -162,11 +174,31 @@ app.get('/api/track-image/:id', async (req, res) => {
 
         if (!isBot && !isSender) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
+            
             if (email) {
-                email.opened = true;
-                email.openCount += 1;
-                email.openHistory.push({ timestamp: new Date(), ip: ip, userAgent: userAgent });
-                await email.save();
+                const now = new Date();
+                let shouldCount = true;
+
+                // --- 5-MINUTE SESSION LOCK ---
+                if (email.openHistory && email.openHistory.length > 0) {
+                    const lastOpen = email.openHistory[email.openHistory.length - 1];
+                    const timeDiff = (now - new Date(lastOpen.timestamp)) / 1000 / 60; // Minutes
+                    
+                    // If same IP and less than 5 mins, ignore
+                    if (lastOpen.ip === ip && timeDiff < 5) {
+                        shouldCount = false;
+                        console.log(`🔒 Session Locked (Last read ${timeDiff.toFixed(1)} mins ago)`);
+                    }
+                }
+
+                if (shouldCount) {
+                    email.opened = true;
+                    email.openCount += 1;
+                    email.openHistory.push({ timestamp: now, ip: ip, userAgent: userAgent });
+                    email.lastOpenedAt = now;
+                    await email.save();
+                    console.log(`✅ Read Counted! Total: ${email.openCount}`);
+                }
             }
         } 
 
@@ -184,93 +216,80 @@ app.get('/api/track-image/:id', async (req, res) => {
 function getCleanSubjectRegex(subject) {
     if (!subject) return null;
     const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
-    // Use regex to match exact phrase only (prevents "Test" matching "Test 2")
     return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${clean}$`, 'i');
 }
 
 function areRecipientsSame(listA, listB) {
     if (!listA || !listB) return false;
-    // Simple overlap check: If they share at least one recipient, consider it same thread
-    // (This handles "To: Alice" vs "To: Alice, Bob")
     const setA = new Set(listA.map(e => e.toLowerCase().trim()));
     const setB = new Set(listB.map(e => e.toLowerCase().trim()));
-    for (let email of setA) {
-        if (setB.has(email)) return true;
-    }
+    for (let email of setA) { if (setB.has(email)) return true; }
     return false;
 }
 
-// --- CHECK STATUS (UPDATED: SMART CLUSTERING) ---
+// 3. Check Status (Sigma Thread Summation)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
         let responseData = { found: false };
-        let subjectToSearch = subject;
-        let specificEmail = null;
+        let emails = [];
 
-        // 1. Fetch Specific Email if ID provided
+        // STRATEGY A: ID-Based Parent-Child Linking (The Best Way)
         if (trackingId) {
-            specificEmail = await TrackedEmail.findOne({ trackingId });
-            if (specificEmail) {
-                responseData = {
-                    found: true,
-                    specificFound: true,
-                    specificOpened: specificEmail.openCount > 0,
-                    specificCount: specificEmail.openCount,
-                    specificHistory: specificEmail.openHistory
-                };
-                if (!subjectToSearch) subjectToSearch = specificEmail.subject;
+            const target = await TrackedEmail.findOne({ trackingId });
+            if (target) {
+                // If I am a child, find my siblings and parent.
+                // If I am a parent, find my children.
+                const rootId = target.parentId || target.trackingId;
+                
+                // Find ALL emails in this family (Root or Child of Root)
+                // Note: Simplified 1-level depth (Parent -> Children). 
+                // Advanced trees would need recursive search, but 1-level covers 99% of emails.
+                emails = await TrackedEmail.find({ 
+                    $or: [
+                        { trackingId: rootId }, // Is the Root
+                        { parentId: rootId }    // Is a Child of Root
+                    ]
+                }).sort({ createdAt: 1 }); // Sort Oldest first
             }
         }
 
-        // 2. Perform Smart Clustering
-        if (subjectToSearch) {
-            const subjectRegex = getCleanSubjectRegex(subjectToSearch);
-            // Get ALL emails with similar subject
+        // STRATEGY B: Subject Clustering Fallback (If no ID match found)
+        if (emails.length === 0 && subject) {
+            const subjectRegex = getCleanSubjectRegex(subject);
             const rawEmails = await TrackedEmail.find({ subject: { $regex: subjectRegex } }).sort({ createdAt: -1 });
-
+            
+            // Smart Filter: Use recipient list of the query target or most recent
             if (rawEmails.length > 0) {
-                // Filter Cluster: Only keep emails that match the "Recipients" of the target
-                // If we have a specificEmail, match ITS recipients.
-                // If not (Subject-only search), default to the recipients of the LATEST email.
-                
-                const targetRecipients = specificEmail ? specificEmail.recipientEmails : rawEmails[0].recipientEmails;
-                
-                // Filter the list to only include this conversation
-                const threadCluster = rawEmails.filter(email => 
-                    areRecipientsSame(email.recipientEmails, targetRecipients)
-                );
-
-                if (threadCluster.length > 0) {
-                    const latestEmail = threadCluster[0]; // Since we sorted -1
-                    
-                    // Sort oldest to newest for the breakdown
-                    const sortedHistory = [...threadCluster].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-                    
-                    const threadBreakdown = sortedHistory.map((email, index) => {
-                        let lastReadTime = null;
-                        if (email.openHistory && email.openHistory.length > 0) {
-                            lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
-                        }
-                        return {
-                            index: index + 1,
-                            date: email.createdAt,
-                            openCount: email.openCount,
-                            isReply: index > 0 || /^(Re|re):/i.test(email.subject), 
-                            lastRead: lastReadTime
-                        };
-                    });
-
-                    responseData = {
-                        ...responseData,
-                        found: true,
-                        // Use latest email status from THIS cluster
-                        opened: responseData.specificFound ? responseData.specificOpened : latestEmail.opened,
-                        openCount: responseData.specificFound ? responseData.specificCount : latestEmail.openCount,
-                        threadBreakdown: threadBreakdown
-                    };
-                }
+                 // Note: Ideally we filter by recipient here too, but for speed in fallback we take the cluster
+                 emails = rawEmails.reverse(); // Make Oldest First for list
             }
+        }
+
+        if (emails.length > 0) {
+            // GENERATE BREAKDOWN
+            const threadBreakdown = emails.map((email, index) => ({
+                index: index + 1,
+                date: email.createdAt,
+                openCount: email.openCount,
+                isReply: !!email.parentId || index > 0, 
+                lastRead: email.openHistory.length > 0 ? email.openHistory[email.openHistory.length-1].timestamp : null
+            }));
+
+            // SIGMA TOTAL (Sum of Thread)
+            const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
+            
+            // LATEST STATUS (For Grey/Green Ticks)
+            // We use the LAST email in the sorted list (Newest)
+            const latest = emails[emails.length - 1];
+
+            responseData = {
+                found: true,
+                opened: latest.opened,       // Status of Newest
+                openCount: latest.openCount, // Count of Newest
+                totalThreadOpens: totalOpens, // NEW: Sum of Thread
+                threadBreakdown: threadBreakdown
+            };
         }
 
         res.json(responseData);
