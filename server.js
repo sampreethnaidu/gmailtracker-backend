@@ -1,4 +1,4 @@
-/* server.js - Version 21.0: Enterprise Edition (Sigma Logic + Session Lock) */
+/* server.js - Version 22.0: Hybrid Search & Fast Sessions */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -11,36 +11,29 @@ const cookieParser = require('cookie-parser');
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; 
 
-// CORS: Allow credentials (cookies) for Sender Protection
 app.use(cors({ origin: true, credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
 app.use(cookieParser()); 
 
-// --- DATABASE CONNECTION ---
 if (!process.env.MONGO_URI) { console.error("FATAL: MONGO_URI missing."); process.exit(1); }
 mongoose.connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log('MongoDB Connected');
-        initializeSystem();
-    })
+    .then(() => { console.log('MongoDB Connected'); initializeSystem(); })
     .catch(err => console.log('DB Error:', err));
 
-// ==========================================
 // --- SCHEMAS ---
-// ==========================================
 const userSchema = new mongoose.Schema({
     name: String,
     email: { type: String, unique: true, required: true },
     password: { type: String, select: false },
-    role: { type: String, enum: ['user', 'ad_client', 'admin'], default: 'user' },
-    plan: { type: String, enum: ['free', 'premium', 'ad_basic', 'ad_premium', 'ad_ultra'], default: 'free' },
+    role: { type: String, default: 'user' },
+    plan: { type: String, default: 'free' },
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
 
 const emailSchema = new mongoose.Schema({
     trackingId: { type: String, unique: true },
-    parentId: { type: String, default: null }, // NEW: Links Reply to Original
+    parentId: { type: String, default: null }, 
     senderEmail: String,
     recipientEmails: [String],
     subject: String,
@@ -52,7 +45,7 @@ const emailSchema = new mongoose.Schema({
         userAgent: String,
         location: String
     }],
-    lastOpenedAt: { type: Date, default: null }, // NEW: For 5-min Session Lock
+    lastOpenedAt: { type: Date, default: null }, 
     createdAt: { type: Date, default: Date.now }
 });
 const TrackedEmail = mongoose.model('TrackedEmail', emailSchema);
@@ -60,7 +53,7 @@ const TrackedEmail = mongoose.model('TrackedEmail', emailSchema);
 const adSchema = new mongoose.Schema({
     clientName: String,
     imageUrl: String,
-    adPlan: { type: String, enum: ['basic', 'premium', 'ultra'], default: 'basic' }, 
+    adPlan: { type: String, default: 'basic' }, 
     maxViews: Number,
     currentViews: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
@@ -70,86 +63,59 @@ const Ad = mongoose.model('Ad', adSchema);
 
 const voucherSchema = new mongoose.Schema({
     code: { type: String, unique: true, required: true },
-    planType: { type: String, required: true },
+    planType: String,
     isRedeemed: { type: Boolean, default: false },
-    redeemedBy: String,
     createdAt: { type: Date, default: Date.now }
 });
 const Voucher = mongoose.model('Voucher', voucherSchema);
 
-// ==========================================
 // --- INITIALIZER ---
-// ==========================================
 const initializeSystem = async () => {
     try {
         const adminExists = await User.findOne({ role: 'admin' });
         if (!adminExists) {
             const hashedPassword = await bcrypt.hash("admin123", 10);
-            await new User({
-                name: "Super Admin",
-                email: "admin@vitsn.com",
-                password: hashedPassword,
-                role: "admin",
-                plan: "premium"
-            }).save();
-            console.log(">> SYSTEM: Default Admin Created");
+            await new User({ name: "Super Admin", email: "admin@vitsn.com", password: hashedPassword, role: "admin", plan: "premium" }).save();
         }
-        
         const adCount = await Ad.countDocuments({ clientName: "VITSN Innovations" });
         if (adCount === 0) {
-            await new Ad({
-                clientName: "VITSN Innovations",
-                imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations",
-                adPlan: 'ultra',
-                maxViews: 999999999,
-                isActive: true
-            }).save();
-            console.log(">> SYSTEM: Default Fallback Ad Initialized");
+            await new Ad({ clientName: "VITSN Innovations", imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN", adPlan: 'ultra', maxViews: 999999999, isActive: true }).save();
         }
     } catch (err) { console.error("Init Error:", err); }
 };
 
-// ==========================================
 // --- MIDDLEWARE ---
-// ==========================================
 const auth = (req, res, next) => {
     const token = req.header('Authorization');
     if (!token) return res.status(401).json({ error: "Access Denied." });
     try {
         const cleanToken = token.replace('Bearer ', '');
-        const verified = jwt.verify(cleanToken, JWT_SECRET);
-        req.user = verified;
+        req.user = jwt.verify(cleanToken, JWT_SECRET);
         next();
     } catch (err) { res.status(400).json({ error: "Invalid Token" }); }
 };
 
-// ==========================================
 // --- ROUTES ---
-// ==========================================
 
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         const user = await User.findOne({ email }).select('+password');
-        if (!user) return res.status(400).json({ error: "User not found" });
-        const validPass = await bcrypt.compare(password, user.password);
-        if (!validPass) return res.status(400).json({ error: "Invalid password" });
+        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ error: "Invalid credentials" });
         if (user.role !== 'admin') return res.status(403).json({ error: "Access restricted" });
         const token = jwt.sign({ _id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
         res.json({ token, user: { name: user.name, email: user.email, role: user.role } });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- TRACKING API (UPDATED) ---
-
-// 1. Generate ID (Now supports parentId for Thread Linking)
+// 1. Generate ID
 app.post('/api/track/generate', async (req, res) => {
     try {
         const { sender, recipients, subject, trackingId, parentId } = req.body;
         const finalId = trackingId || uuidv4();
         await new TrackedEmail({ 
             trackingId: finalId, 
-            parentId: parentId || null, // Capture Parent ID
+            parentId: parentId || null, 
             senderEmail: sender, 
             recipientEmails: recipients, 
             subject 
@@ -160,17 +126,16 @@ app.post('/api/track/generate', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
-// 2. Serve Pixel (With 5-Min Session Lock)
+// 2. Serve Pixel (UPDATED: 30 Second Session Lock)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const userAgent = req.headers['user-agent'] || '';
         const ip = req.ip;
-        
         const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
         const isSender = req.cookies['vitsn_sender'] === 'true';
 
-        console.log(`[PIXEL HIT] ID: ${trackingId} | Bot: ${isBot} | Sender: ${isSender}`);
+        console.log(`[HIT] ID: ${trackingId} | Sender: ${isSender}`);
 
         if (!isBot && !isSender) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
@@ -179,15 +144,15 @@ app.get('/api/track-image/:id', async (req, res) => {
                 const now = new Date();
                 let shouldCount = true;
 
-                // --- 5-MINUTE SESSION LOCK ---
+                // --- 30 SECOND SESSION LOCK (Anti-Flicker) ---
                 if (email.openHistory && email.openHistory.length > 0) {
                     const lastOpen = email.openHistory[email.openHistory.length - 1];
-                    const timeDiff = (now - new Date(lastOpen.timestamp)) / 1000 / 60; // Minutes
+                    const timeDiffSeconds = (now - new Date(lastOpen.timestamp)) / 1000;
                     
-                    // If same IP and less than 5 mins, ignore
-                    if (lastOpen.ip === ip && timeDiff < 5) {
+                    // If same IP and less than 30 seconds, IGNORE
+                    if (lastOpen.ip === ip && timeDiffSeconds < 30) {
                         shouldCount = false;
-                        console.log(`🔒 Session Locked (Last read ${timeDiff.toFixed(1)} mins ago)`);
+                        console.log(`🔒 Debounce: Ignored (Re-opened in ${timeDiffSeconds.toFixed(1)}s)`);
                     }
                 }
 
@@ -197,78 +162,75 @@ app.get('/api/track-image/:id', async (req, res) => {
                     email.openHistory.push({ timestamp: now, ip: ip, userAgent: userAgent });
                     email.lastOpenedAt = now;
                     await email.save();
-                    console.log(`✅ Read Counted! Total: ${email.openCount}`);
+                    console.log(`✅ Counted! Total: ${email.openCount}`);
                 }
             }
         } 
 
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
-        res.writeHead(200, { 
-            'Content-Type': 'image/gif', 
-            'Content-Length': img.length, 
-            'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0' 
-        });
+        res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': img.length, 'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0' });
         res.end(img);
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// --- HELPER: Clean Subject & Compare Recipients ---
+// Helper Regex
 function getCleanSubjectRegex(subject) {
     if (!subject) return null;
     const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
     return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${clean}$`, 'i');
 }
 
-function areRecipientsSame(listA, listB) {
-    if (!listA || !listB) return false;
-    const setA = new Set(listA.map(e => e.toLowerCase().trim()));
-    const setB = new Set(listB.map(e => e.toLowerCase().trim()));
-    for (let email of setA) { if (setB.has(email)) return true; }
-    return false;
-}
-
-// 3. Check Status (Sigma Thread Summation)
+// 3. Check Status (UPDATED: Hybrid Search - ID + Subject)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
         let responseData = { found: false };
-        let emails = [];
+        let finalEmails = [];
 
-        // STRATEGY A: ID-Based Parent-Child Linking (The Best Way)
+        // STRATEGY: Hybrid Search (Merge ID Families + Subject Orphans)
+        
+        let familyEmails = [];
+        let subjectEmails = [];
+        let targetSubject = subject;
+
+        // 1. Get Family Tree (If ID provided)
         if (trackingId) {
             const target = await TrackedEmail.findOne({ trackingId });
             if (target) {
-                // If I am a child, find my siblings and parent.
-                // If I am a parent, find my children.
+                targetSubject = target.subject; // Update subject for fallback search
                 const rootId = target.parentId || target.trackingId;
-                
-                // Find ALL emails in this family (Root or Child of Root)
-                // Note: Simplified 1-level depth (Parent -> Children). 
-                // Advanced trees would need recursive search, but 1-level covers 99% of emails.
-                emails = await TrackedEmail.find({ 
-                    $or: [
-                        { trackingId: rootId }, // Is the Root
-                        { parentId: rootId }    // Is a Child of Root
-                    ]
-                }).sort({ createdAt: 1 }); // Sort Oldest first
+                familyEmails = await TrackedEmail.find({ 
+                    $or: [ { trackingId: rootId }, { parentId: rootId } ]
+                });
             }
         }
 
-        // STRATEGY B: Subject Clustering Fallback (If no ID match found)
-        if (emails.length === 0 && subject) {
-            const subjectRegex = getCleanSubjectRegex(subject);
-            const rawEmails = await TrackedEmail.find({ subject: { $regex: subjectRegex } }).sort({ createdAt: -1 });
-            
-            // Smart Filter: Use recipient list of the query target or most recent
-            if (rawEmails.length > 0) {
-                 // Note: Ideally we filter by recipient here too, but for speed in fallback we take the cluster
-                 emails = rawEmails.reverse(); // Make Oldest First for list
-            }
+        // 2. Get Subject Matches (The Safety Net)
+        if (targetSubject) {
+            const subjectRegex = getCleanSubjectRegex(targetSubject);
+            subjectEmails = await TrackedEmail.find({ subject: { $regex: subjectRegex } });
         }
 
-        if (emails.length > 0) {
+        // 3. MERGE & DEDUPLICATE (The "Hybrid" Fix)
+        const emailMap = new Map();
+        
+        // Add Family First (Highest Confidence)
+        familyEmails.forEach(e => emailMap.set(e.trackingId, e));
+        
+        // Add Subject Matches (Only if recipients roughly match to avoid pollution)
+        // Note: For now, we add all subject matches to ensure the "Reply" is caught even if ID Link failed
+        subjectEmails.forEach(e => {
+            if (!emailMap.has(e.trackingId)) {
+                emailMap.set(e.trackingId, e);
+            }
+        });
+
+        // Convert back to array and sort by Date
+        finalEmails = Array.from(emailMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+        if (finalEmails.length > 0) {
             // GENERATE BREAKDOWN
-            const threadBreakdown = emails.map((email, index) => ({
+            const threadBreakdown = finalEmails.map((email, index) => ({
                 index: index + 1,
                 date: email.createdAt,
                 openCount: email.openCount,
@@ -276,18 +238,17 @@ app.get('/api/check-status', async (req, res) => {
                 lastRead: email.openHistory.length > 0 ? email.openHistory[email.openHistory.length-1].timestamp : null
             }));
 
-            // SIGMA TOTAL (Sum of Thread)
-            const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
+            // SIGMA TOTAL
+            const totalOpens = finalEmails.reduce((acc, email) => acc + email.openCount, 0);
             
-            // LATEST STATUS (For Grey/Green Ticks)
-            // We use the LAST email in the sorted list (Newest)
-            const latest = emails[emails.length - 1];
+            // LATEST STATUS (Newest Email)
+            const latest = finalEmails[finalEmails.length - 1];
 
             responseData = {
                 found: true,
-                opened: latest.opened,       // Status of Newest
-                openCount: latest.openCount, // Count of Newest
-                totalThreadOpens: totalOpens, // NEW: Sum of Thread
+                opened: latest.opened,
+                openCount: latest.openCount,
+                totalThreadOpens: totalOpens,
                 threadBreakdown: threadBreakdown
             };
         }
