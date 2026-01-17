@@ -1,4 +1,6 @@
 /* server.js - Final Commercial Edition (v12.0 Compatible - Full Features) */
+/* Updated: Google Proxy Fix + Separate Reply Tracking + Strict No-Cache */
+
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -12,7 +14,8 @@ const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; 
 
 // CORS: Allow credentials (cookies) for Sender Protection
-app.use(cors({ origin: '*', credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
+// We allow all origins ('*') but with credentials enabled for the extension
+app.use(cors({ origin: true, credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
 app.use(cookieParser()); // Enable Cookie Parsing
 
@@ -167,44 +170,53 @@ app.post('/api/track/generate', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
-// Tracking Pixel (With Cookie Protection)
+// Tracking Pixel (UPDATED: Fixes Grey Ticks / Google Proxy Issue)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const userAgent = req.headers['user-agent'] || '';
         const ip = req.ip;
-        const isBot = /bot|crawler|spider|facebookexternalhit|google/i.test(userAgent);
+        
+        // FIX: Removed 'google' to allow Gmail Proxy to fetch the image
+        const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
 
         // CHECK SENDER COOKIE: If "vitsn_sender" is true, DO NOT count the open
         const isSender = req.cookies['vitsn_sender'] === 'true';
 
+        // Log for Render Console (Debugging)
+        console.log(`[PIXEL HIT] ID: ${trackingId} | Bot: ${isBot} | Sender: ${isSender}`);
+
         if (!isBot && !isSender) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
             if (email) {
-                console.log(`OPEN: ${email.subject} | ID: ${trackingId}`);
+                console.log(`✅ OPEN: ${email.subject}`);
                 email.opened = true;
                 email.openCount += 1;
                 email.openHistory.push({ timestamp: new Date(), ip: ip, userAgent: userAgent });
                 await email.save();
             }
         } else if (isSender) {
-            console.log(`IGNORED OPEN: ${trackingId} (Viewer: Sender)`);
+            console.log(`🚫 IGNORED (Sender View)`);
         }
 
-        // Return Transparent Pixel
+        // Return Transparent Pixel with STRICT No-Cache Headers
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
-        res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': img.length, 'Cache-Control': 'no-cache, no-store, must-revalidate' });
+        res.writeHead(200, { 
+            'Content-Type': 'image/gif', 
+            'Content-Length': img.length, 
+            'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0' // Prevent caching issues
+        });
         res.end(img);
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Check Status (CRITICAL UPDATE: Supports Unique Tracking ID)
+// Check Status (UPDATED: Supports Unique Tracking ID for Replies)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
 
         // A. PRIORITY: Check by Unique Tracking ID (Exact Match)
-        // This allows Reply/Forward tracking separation
+        // This is key for Version 12.0 Extension to show separate reply counts
         if (trackingId) {
             const specificEmail = await TrackedEmail.findOne({ trackingId: trackingId });
             
@@ -223,7 +235,7 @@ app.get('/api/check-status', async (req, res) => {
         }
 
         // B. FALLBACK: Check by Subject (Total Thread Count)
-        // Used if the frontend cannot find the hidden pixel ID
+        // Used if the frontend cannot find the hidden pixel ID (e.g., collapsed emails)
         if (subject) {
             const emails = await TrackedEmail.find({ subject: subject });
             
@@ -231,7 +243,7 @@ app.get('/api/check-status', async (req, res) => {
                 const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
                 const isOpened = totalOpens > 0;
                 
-                // Combine history
+                // Combine history from all thread messages
                 let combinedHistory = [];
                 emails.forEach(email => {
                     if (email.openHistory) combinedHistory = combinedHistory.concat(email.openHistory);
@@ -256,7 +268,7 @@ app.get('/api/check-status', async (req, res) => {
     }
 });
 
-// 4. Serve Ads (Kept in Backend)
+// 4. Serve Ads (Backend Logic Kept Intact)
 app.get('/api/ads/serve', async (req, res) => {
     try {
         const randomAds = await Ad.aggregate([
