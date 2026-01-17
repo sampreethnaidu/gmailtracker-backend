@@ -210,52 +210,49 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Check Status (UPDATED: Supports Unique Tracking ID for Replies)
+// Check Status (Updated for Thread Breakdown)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
 
-        // A. PRIORITY: Check by Unique Tracking ID (Exact Match)
-        // This is key for Version 12.0 Extension to show separate reply counts
+        // 1. If trackingId is present, try to find exact match
         if (trackingId) {
-            const specificEmail = await TrackedEmail.findOne({ trackingId: trackingId });
-            
+            const specificEmail = await TrackedEmail.findOne({ trackingId });
             if (specificEmail) {
                 return res.json({
                     found: true,
-                    specificFound: true, // Frontend looks for this flag
+                    specificFound: true,
                     specificOpened: specificEmail.openCount > 0,
                     specificCount: specificEmail.openCount,
-                    specificHistory: specificEmail.openHistory || [],
-                    // Legacy Fallback fields
-                    opened: specificEmail.openCount > 0,
-                    openCount: specificEmail.openCount
+                    specificHistory: specificEmail.openHistory
                 });
             }
         }
 
-        // B. FALLBACK: Check by Subject (Total Thread Count)
-        // Used if the frontend cannot find the hidden pixel ID (e.g., collapsed emails)
+        // 2. Fallback: Search by Subject & Generate Breakdown
         if (subject) {
-            const emails = await TrackedEmail.find({ subject: subject });
+            // Find ALL emails in this thread, sorted by Date (Oldest to Newest)
+            const emails = await TrackedEmail.find({ subject: subject }).sort({ createdAt: 1 });
             
             if (emails.length > 0) {
                 const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
-                const isOpened = totalOpens > 0;
                 
-                // Combine history from all thread messages
-                let combinedHistory = [];
-                emails.forEach(email => {
-                    if (email.openHistory) combinedHistory = combinedHistory.concat(email.openHistory);
-                });
-                combinedHistory.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                // --- NEW: CREATE BREAKDOWN ---
+                // We create a list showing the status of EACH email in the thread
+                const threadBreakdown = emails.map((email, index) => ({
+                    index: index + 1,
+                    date: email.createdAt,
+                    openCount: email.openCount,
+                    isReply: index > 0 // First one is original, others are replies
+                }));
 
                 return res.json({
                     found: true,
-                    specificFound: false, // Indicates summary mode
-                    opened: isOpened,
+                    specificFound: false,
+                    opened: totalOpens > 0,
                     openCount: totalOpens,
-                    openHistory: combinedHistory
+                    // Send this new list to the frontend
+                    threadBreakdown: threadBreakdown 
                 });
             }
         }
