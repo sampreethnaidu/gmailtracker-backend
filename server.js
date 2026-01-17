@@ -1,4 +1,4 @@
-/* server.js - Version 19.0: Smart Thread Grouping (Ignore Re/Fwd) */
+/* server.js - Version 20.0: Smart Recipient Clustering */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -40,7 +40,7 @@ const User = mongoose.model('User', userSchema);
 const emailSchema = new mongoose.Schema({
     trackingId: { type: String, unique: true },
     senderEmail: String,
-    recipientEmails: [String],
+    recipientEmails: [String], // Array of strings
     subject: String,
     opened: { type: Boolean, default: false },
     openCount: { type: Number, default: 0 },
@@ -180,25 +180,37 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// --- HELPER: Clean Subject (Remove Re:, Fwd:, etc.) ---
+// --- HELPER: Clean Subject & Compare Recipients ---
 function getCleanSubjectRegex(subject) {
     if (!subject) return null;
-    // Remove "Re:", "Fwd:", "re:", etc. and trim spaces
     const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
-    // Return Regex: Matches "Subject", "Re: Subject", "Fwd: Subject"
+    // Use regex to match exact phrase only (prevents "Test" matching "Test 2")
     return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${clean}$`, 'i');
 }
 
-// --- CHECK STATUS (UPDATED: SMART THREAD GROUPING) ---
+function areRecipientsSame(listA, listB) {
+    if (!listA || !listB) return false;
+    // Simple overlap check: If they share at least one recipient, consider it same thread
+    // (This handles "To: Alice" vs "To: Alice, Bob")
+    const setA = new Set(listA.map(e => e.toLowerCase().trim()));
+    const setB = new Set(listB.map(e => e.toLowerCase().trim()));
+    for (let email of setA) {
+        if (setB.has(email)) return true;
+    }
+    return false;
+}
+
+// --- CHECK STATUS (UPDATED: SMART CLUSTERING) ---
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
         let responseData = { found: false };
         let subjectToSearch = subject;
+        let specificEmail = null;
 
-        // 1. Specific ID Match
+        // 1. Fetch Specific Email if ID provided
         if (trackingId) {
-            const specificEmail = await TrackedEmail.findOne({ trackingId });
+            specificEmail = await TrackedEmail.findOne({ trackingId });
             if (specificEmail) {
                 responseData = {
                     found: true,
@@ -211,43 +223,53 @@ app.get('/api/check-status', async (req, res) => {
             }
         }
 
-        // 2. Thread Breakdown (With Regex Search)
+        // 2. Perform Smart Clustering
         if (subjectToSearch) {
-            // NEW: Create Regex to ignore Re/Fwd prefixes
             const subjectRegex = getCleanSubjectRegex(subjectToSearch);
-            
-            // Search using Regex instead of exact match
-            const emails = await TrackedEmail.find({ subject: { $regex: subjectRegex } }).sort({ createdAt: -1 });
-            
-            if (emails.length > 0) {
-                const latestEmail = emails[0]; 
-                
-                // Sort oldest to newest for breakdown
-                const sortedHistory = [...emails].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-                
-                const threadBreakdown = sortedHistory.map((email, index) => {
-                    let lastReadTime = null;
-                    if (email.openHistory && email.openHistory.length > 0) {
-                        lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
-                    }
+            // Get ALL emails with similar subject
+            const rawEmails = await TrackedEmail.find({ subject: { $regex: subjectRegex } }).sort({ createdAt: -1 });
 
-                    return {
-                        index: index + 1,
-                        date: email.createdAt,
-                        openCount: email.openCount,
-                        // If Subject contains "Re:" or it's not the first one, mark as reply
-                        isReply: index > 0 || /^(Re|re):/i.test(email.subject), 
-                        lastRead: lastReadTime
+            if (rawEmails.length > 0) {
+                // Filter Cluster: Only keep emails that match the "Recipients" of the target
+                // If we have a specificEmail, match ITS recipients.
+                // If not (Subject-only search), default to the recipients of the LATEST email.
+                
+                const targetRecipients = specificEmail ? specificEmail.recipientEmails : rawEmails[0].recipientEmails;
+                
+                // Filter the list to only include this conversation
+                const threadCluster = rawEmails.filter(email => 
+                    areRecipientsSame(email.recipientEmails, targetRecipients)
+                );
+
+                if (threadCluster.length > 0) {
+                    const latestEmail = threadCluster[0]; // Since we sorted -1
+                    
+                    // Sort oldest to newest for the breakdown
+                    const sortedHistory = [...threadCluster].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                    
+                    const threadBreakdown = sortedHistory.map((email, index) => {
+                        let lastReadTime = null;
+                        if (email.openHistory && email.openHistory.length > 0) {
+                            lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
+                        }
+                        return {
+                            index: index + 1,
+                            date: email.createdAt,
+                            openCount: email.openCount,
+                            isReply: index > 0 || /^(Re|re):/i.test(email.subject), 
+                            lastRead: lastReadTime
+                        };
+                    });
+
+                    responseData = {
+                        ...responseData,
+                        found: true,
+                        // Use latest email status from THIS cluster
+                        opened: responseData.specificFound ? responseData.specificOpened : latestEmail.opened,
+                        openCount: responseData.specificFound ? responseData.specificCount : latestEmail.openCount,
+                        threadBreakdown: threadBreakdown
                     };
-                });
-
-                responseData = {
-                    ...responseData,
-                    found: true,
-                    opened: responseData.specificFound ? responseData.specificOpened : latestEmail.opened,
-                    openCount: responseData.specificFound ? responseData.specificCount : latestEmail.openCount,
-                    threadBreakdown: threadBreakdown
-                };
+                }
             }
         }
 
