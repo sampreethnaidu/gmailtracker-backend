@@ -1,4 +1,4 @@
-/* server.js - Version 24.0: Full Read History Support */
+/* server.js - Version 25.0: Explicit Mail Types & Contextual Linking */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -37,6 +37,7 @@ const emailSchema = new mongoose.Schema({
     senderEmail: String,
     recipientEmails: [String],
     subject: String,
+    mailType: { type: String, default: "Original" }, // NEW: Stores "Reply", "Forward", etc.
     opened: { type: Boolean, default: false },
     openCount: { type: Number, default: 0 },
     openHistory: [{
@@ -108,17 +109,18 @@ app.post('/api/auth/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 1. Generate ID
+// 1. Generate ID (Supports explicit mailType)
 app.post('/api/track/generate', async (req, res) => {
     try {
-        const { sender, recipients, subject, trackingId, parentId } = req.body;
+        const { sender, recipients, subject, trackingId, parentId, mailType } = req.body;
         const finalId = trackingId || uuidv4();
         await new TrackedEmail({ 
             trackingId: finalId, 
             parentId: parentId || null, 
             senderEmail: sender, 
             recipientEmails: recipients, 
-            subject 
+            subject,
+            mailType: mailType || "Original" // Store the detected type
         }).save();
         
         const baseUrl = process.env.BASE_URL || "https://gmailtracker-backend.onrender.com"; 
@@ -176,7 +178,7 @@ function getNormalizedSubjectRegex(subject) {
     return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${escaped}$`, 'i');
 }
 
-// 3. Check Status (Full History)
+// 3. Check Status (Uses Saved mailType)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
@@ -216,27 +218,31 @@ app.get('/api/check-status', async (req, res) => {
 
         if (finalEmails.length > 0) {
             const threadBreakdown = finalEmails.map((email, index) => {
-                let type = "Original";
-                const s = email.subject.toLowerCase();
                 
-                if (index > 0) type = "Reply"; 
-                if (s.startsWith("fwd:") || s.startsWith("fw:")) type = "Forward";
-                else if (s.startsWith("re:") || s.startsWith("aw:")) type = "Reply";
-                
-                // --- NEW: SEND FULL HISTORY ---
-                // We map over openHistory to format timestamps for the frontend
+                // --- SMART LABELING ---
+                // Priority 1: Use explicitly saved type (from V25.0+)
+                let displayType = email.mailType;
+
+                // Priority 2: Fallback for older emails (V1-24)
+                if (!displayType || displayType === "Original") {
+                    const s = email.subject.toLowerCase();
+                    if (index > 0) displayType = "Reply";
+                    if (s.startsWith("fwd:") || s.startsWith("fw:")) displayType = "Forward";
+                    else if (s.startsWith("re:") || s.startsWith("aw:")) displayType = "Reply";
+                }
+
+                // Format History
                 const historyLog = email.openHistory.map(h => ({
                     timestamp: h.timestamp,
-                    // We can include IP here if you want to show it later, but keeping it simple for now
                 }));
 
                 return {
                     index: index + 1,
                     date: email.createdAt,
                     openCount: email.openCount,
-                    isReply: type === "Reply",
-                    type: type,
-                    history: historyLog // <--- FULL HISTORY ARRAY
+                    isReply: displayType === "Reply",
+                    type: displayType, 
+                    history: historyLog
                 };
             });
 
