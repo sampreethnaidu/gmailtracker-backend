@@ -1,4 +1,4 @@
-/* server.js - Version 23.0: Explicit Labeling + Norm Subject */
+/* server.js - Version 24.0: Full Read History Support */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -169,18 +169,14 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Helper: Normalized Subject Matcher
 function getNormalizedSubjectRegex(subject) {
     if (!subject) return null;
-    // Remove Re/Fwd prefixes and trim
     const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
-    // Escape special chars for Regex
     const escaped = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Match optional prefixes + clean subject
     return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${escaped}$`, 'i');
 }
 
-// 3. Check Status (Fixing Missing Replies)
+// 3. Check Status (Full History)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
@@ -216,31 +212,31 @@ app.get('/api/check-status', async (req, res) => {
             if (!emailMap.has(e.trackingId)) emailMap.set(e.trackingId, e);
         });
 
-        // Sort by Date
         finalEmails = Array.from(emailMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
         if (finalEmails.length > 0) {
             const threadBreakdown = finalEmails.map((email, index) => {
-                // EXPLICIT LABELING LOGIC
                 let type = "Original";
                 const s = email.subject.toLowerCase();
                 
-                if (index > 0) type = "Reply"; // Default assumption
+                if (index > 0) type = "Reply"; 
                 if (s.startsWith("fwd:") || s.startsWith("fw:")) type = "Forward";
                 else if (s.startsWith("re:") || s.startsWith("aw:")) type = "Reply";
                 
-                let lastReadTime = null;
-                if (email.openHistory && email.openHistory.length > 0) {
-                    lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
-                }
+                // --- NEW: SEND FULL HISTORY ---
+                // We map over openHistory to format timestamps for the frontend
+                const historyLog = email.openHistory.map(h => ({
+                    timestamp: h.timestamp,
+                    // We can include IP here if you want to show it later, but keeping it simple for now
+                }));
 
                 return {
                     index: index + 1,
                     date: email.createdAt,
                     openCount: email.openCount,
                     isReply: type === "Reply",
-                    type: type, // NEW: Explicit Type
-                    lastRead: lastReadTime
+                    type: type,
+                    history: historyLog // <--- FULL HISTORY ARRAY
                 };
             });
 
