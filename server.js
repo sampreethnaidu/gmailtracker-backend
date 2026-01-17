@@ -1,4 +1,4 @@
-/* server.js - Final Commercial Edition (Auth + History + Ads + Admin + Cookie Guard) */
+/* server.js - Final Commercial Edition (v12.0 Compatible - Full Features) */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -6,15 +6,15 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs'); // Security: For password hashing
 const jwt = require('jsonwebtoken'); // Security: For login tokens
-const cookieParser = require('cookie-parser'); // NEW: For Sender Protection
+const cookieParser = require('cookie-parser'); // Sender Protection
 
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; // Change this in production
+const JWT_SECRET = process.env.JWT_SECRET || "vitsn-super-secret-key-2026"; 
 
-// CORS: Updated to allow credentials (cookies) if needed in future
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
+// CORS: Allow credentials (cookies) for Sender Protection
+app.use(cors({ origin: '*', credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
-app.use(cookieParser()); // NEW: Enable Cookie Parsing middleware
+app.use(cookieParser()); // Enable Cookie Parsing
 
 // --- DATABASE CONNECTION ---
 if (!process.env.MONGO_URI) { console.error("FATAL: MONGO_URI missing."); process.exit(1); }
@@ -33,7 +33,7 @@ mongoose.connect(process.env.MONGO_URI)
 const userSchema = new mongoose.Schema({
     name: String,
     email: { type: String, unique: true, required: true },
-    password: { type: String, select: false }, // Hidden by default for security
+    password: { type: String, select: false }, // Hidden by default
     role: { type: String, enum: ['user', 'ad_client', 'admin'], default: 'user' },
     plan: { type: String, enum: ['free', 'premium', 'ad_basic', 'ad_premium', 'ad_ultra'], default: 'free' },
     createdAt: { type: Date, default: Date.now }
@@ -42,7 +42,7 @@ const User = mongoose.model('User', userSchema);
 
 // 2. TRACKED EMAIL
 const emailSchema = new mongoose.Schema({
-    trackingId: String,
+    trackingId: { type: String, unique: true }, // Ensure ID is unique
     senderEmail: String,
     recipientEmails: [String],
     subject: String,
@@ -88,7 +88,7 @@ const initializeSystem = async () => {
         // 1. Create Default Admin (If missing)
         const adminExists = await User.findOne({ role: 'admin' });
         if (!adminExists) {
-            const hashedPassword = await bcrypt.hash("admin123", 10); // Default Password
+            const hashedPassword = await bcrypt.hash("admin123", 10);
             await new User({
                 name: "Super Admin",
                 email: "admin@vitsn.com",
@@ -96,7 +96,7 @@ const initializeSystem = async () => {
                 role: "admin",
                 plan: "premium"
             }).save();
-            console.log(">> SYSTEM: Default Admin Created (admin@vitsn.com / admin123)");
+            console.log(">> SYSTEM: Default Admin Created (admin@vitsn.com)");
         }
 
         // 2. Create Default Fallback Ad (If missing)
@@ -104,7 +104,7 @@ const initializeSystem = async () => {
         if (adCount === 0) {
             await new Ad({
                 clientName: "VITSN Innovations",
-                imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations+@copyright+by+Mr,+Yellapu+Sampreeth+Naidu",
+                imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations",
                 adPlan: 'ultra',
                 maxViews: 999999999,
                 isActive: true
@@ -115,14 +115,13 @@ const initializeSystem = async () => {
 };
 
 // ==========================================
-// --- MIDDLEWARE (Security Guard) ---
+// --- MIDDLEWARE (Security) ---
 // ==========================================
 const auth = (req, res, next) => {
     const token = req.header('Authorization');
     if (!token) return res.status(401).json({ error: "Access Denied. Login required." });
 
     try {
-        // Extract token (remove 'Bearer ' if present)
         const cleanToken = token.replace('Bearer ', '');
         const verified = jwt.verify(cleanToken, JWT_SECRET);
         req.user = verified;
@@ -136,30 +135,26 @@ const auth = (req, res, next) => {
 // --- ROUTES ---
 // ==========================================
 
-// --- 1. AUTHENTICATION (Login) ---
+// --- 1. AUTHENTICATION ---
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         
-        // Find user and explicitly select password (since it's hidden by default)
         const user = await User.findOne({ email }).select('+password');
         if (!user) return res.status(400).json({ error: "User not found" });
 
-        // Check password
         const validPass = await bcrypt.compare(password, user.password);
         if (!validPass) return res.status(400).json({ error: "Invalid password" });
 
-        // Check role
         if (user.role !== 'admin') return res.status(403).json({ error: "Access restricted to Admins" });
 
-        // Generate Token
         const token = jwt.sign({ _id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '12h' });
         
         res.json({ token, user: { name: user.name, email: user.email, role: user.role } });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 2. EXTENSION API (Public) ---
+// --- 2. EXTENSION API (Tracking Logic) ---
 
 // Generate ID
 app.post('/api/track/generate', async (req, res) => {
@@ -172,23 +167,21 @@ app.post('/api/track/generate', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
-// Tracking Pixel (UPDATED FOR SENDER PROTECTION)
+// Tracking Pixel (With Cookie Protection)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
         const userAgent = req.headers['user-agent'] || '';
         const ip = req.ip;
-        const isBot = /bot|crawler|spider|facebookexternalhit/i.test(userAgent);
+        const isBot = /bot|crawler|spider|facebookexternalhit|google/i.test(userAgent);
 
-        // 1. CHECK SENDER COOKIE (New Logic)
-        // If the cookie "vitsn_sender" is "true", we know this request is from the Sender.
-        // We will IGNORE the count update but still return the image.
+        // CHECK SENDER COOKIE: If "vitsn_sender" is true, DO NOT count the open
         const isSender = req.cookies['vitsn_sender'] === 'true';
 
         if (!isBot && !isSender) {
             const email = await TrackedEmail.findOne({ trackingId: trackingId });
             if (email) {
-                console.log(`REAL OPEN: ${email.subject} (Viewer: Recipient)`);
+                console.log(`OPEN: ${email.subject} | ID: ${trackingId}`);
                 email.opened = true;
                 email.openCount += 1;
                 email.openHistory.push({ timestamp: new Date(), ip: ip, userAgent: userAgent });
@@ -198,38 +191,74 @@ app.get('/api/track-image/:id', async (req, res) => {
             console.log(`IGNORED OPEN: ${trackingId} (Viewer: Sender)`);
         }
 
-        // 2. ALWAYS Return the Invisible Pixel
-        // This prevents the "Broken Image" icon in Gmail for everyone.
+        // Return Transparent Pixel
         const img = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
         res.writeHead(200, { 'Content-Type': 'image/gif', 'Content-Length': img.length, 'Cache-Control': 'no-cache, no-store, must-revalidate' });
         res.end(img);
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Check Status (With Full History)
+// Check Status (CRITICAL UPDATE: Supports Unique Tracking ID)
 app.get('/api/check-status', async (req, res) => {
     try {
-        const { subject } = req.query;
-        if (!subject) return res.json({ found: false });
-        const email = await TrackedEmail.findOne({ subject: subject }).sort({ createdAt: -1 });
-        if (email) {
-            res.json({
-                found: true,
-                opened: email.opened,
-                openCount: email.openCount,
-                recipient: email.recipientEmails[0],
-                openHistory: email.openHistory, // Sends full history
-                firstOpen: email.openHistory.length > 0 ? email.openHistory[0].timestamp : null
-            });
-        } else { res.json({ found: false }); }
-    } catch (error) { res.status(500).json({ error: 'Error' }); }
+        const { subject, trackingId } = req.query;
+
+        // A. PRIORITY: Check by Unique Tracking ID (Exact Match)
+        // This allows Reply/Forward tracking separation
+        if (trackingId) {
+            const specificEmail = await TrackedEmail.findOne({ trackingId: trackingId });
+            
+            if (specificEmail) {
+                return res.json({
+                    found: true,
+                    specificFound: true, // Frontend looks for this flag
+                    specificOpened: specificEmail.openCount > 0,
+                    specificCount: specificEmail.openCount,
+                    specificHistory: specificEmail.openHistory || [],
+                    // Legacy Fallback fields
+                    opened: specificEmail.openCount > 0,
+                    openCount: specificEmail.openCount
+                });
+            }
+        }
+
+        // B. FALLBACK: Check by Subject (Total Thread Count)
+        // Used if the frontend cannot find the hidden pixel ID
+        if (subject) {
+            const emails = await TrackedEmail.find({ subject: subject });
+            
+            if (emails.length > 0) {
+                const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
+                const isOpened = totalOpens > 0;
+                
+                // Combine history
+                let combinedHistory = [];
+                emails.forEach(email => {
+                    if (email.openHistory) combinedHistory = combinedHistory.concat(email.openHistory);
+                });
+                combinedHistory.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                return res.json({
+                    found: true,
+                    specificFound: false, // Indicates summary mode
+                    opened: isOpened,
+                    openCount: totalOpens,
+                    openHistory: combinedHistory
+                });
+            }
+        }
+
+        res.json({ found: false });
+
+    } catch (error) {
+        console.error("Check Status Error:", error);
+        res.status(500).json({ error: "Server error" });
+    }
 });
 
-// 4. Serve Ads (Smart Random Rotation)
+// 4. Serve Ads (Kept in Backend)
 app.get('/api/ads/serve', async (req, res) => {
     try {
-        // Step 1: Find ALL eligible paying ads (Active + Has Views Left)
-        // We use 'aggregate' and '$sample' to pick ONE random winner
         const randomAds = await Ad.aggregate([
             { 
                 $match: { 
@@ -238,40 +267,27 @@ app.get('/api/ads/serve', async (req, res) => {
                     $expr: { $lt: ["$currentViews", "$maxViews"] } 
                 } 
             },
-            { $sample: { size: 1 } } // <--- THE MAGIC: Picks 1 random ad
+            { $sample: { size: 1 } }
         ]);
 
         let ad = randomAds[0];
 
-        // Step 2: Fallback to VITSN Default if no paying ads exist
         if (!ad) {
             ad = await Ad.findOne({ clientName: "VITSN Innovations" });
         }
 
         if (ad) {
-            // Only count views for paying clients
             if (ad.clientName !== "VITSN Innovations") {
-                // Since 'aggregate' returns a plain object, we must re-fetch to save
                 await Ad.updateOne({ _id: ad._id }, { $inc: { currentViews: 1 } });
             }
-            
-            res.json({ 
-                found: true, 
-                clientName: ad.clientName, 
-                imageUrl: ad.imageUrl 
-            });
+            res.json({ found: true, clientName: ad.clientName, imageUrl: ad.imageUrl });
         } else { 
-            // Absolute Safety Net
-            res.json({ 
-                found: true, 
-                clientName: "VITSN Innovations",
-                imageUrl: "https://dummyimage.com/600x80/f1f3f4/555555&text=Sponsored+by+VITSN+Innovations"
-            }); 
+            res.json({ found: true, clientName: "VITSN", imageUrl: "https://dummyimage.com/600x80/ccc/000&text=Ads" }); 
         }
     } catch (error) { res.status(500).json({ error: 'Error serving ad' }); }
 });
 
-// --- 3. ADMIN DASHBOARD API (Protected with 'auth' Middleware) ---
+// --- 3. ADMIN DASHBOARD API ---
 
 // Stats
 app.get('/api/admin/stats', auth, async (req, res) => {
@@ -323,7 +339,6 @@ app.get('/api/admin/users', auth, async (req, res) => { res.json(await User.find
 app.post('/api/admin/users', auth, async (req, res) => {
     try {
         const { name, email, role, plan } = req.body;
-        // Note: Manually added users get a default password 'user123' (change in production)
         const hashedPassword = await bcrypt.hash("user123", 10);
         await new User({ name, email, password: hashedPassword, role, plan }).save();
         res.json({ success: true });
