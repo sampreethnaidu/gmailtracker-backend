@@ -1,4 +1,4 @@
-/* server.js - Final Commercial Edition (v16.0 - Always Breakdown) */
+/* server.js - Version 18.0: Read Timestamps & Priority Logic */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -91,7 +91,7 @@ const initializeSystem = async () => {
             }).save();
             console.log(">> SYSTEM: Default Admin Created");
         }
-
+        
         const adCount = await Ad.countDocuments({ clientName: "VITSN Innovations" });
         if (adCount === 0) {
             await new Ad({
@@ -180,14 +180,14 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// --- CHECK STATUS (UPDATED FOR ALWAYS BREAKDOWN) ---
+// --- CHECK STATUS (UPDATED: SEND LAST READ TIME) ---
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
         let responseData = { found: false };
         let subjectToSearch = subject;
 
-        // 1. FIRST, check if we have a Specific ID
+        // 1. Specific ID Match
         if (trackingId) {
             const specificEmail = await TrackedEmail.findOne({ trackingId });
             if (specificEmail) {
@@ -198,33 +198,44 @@ app.get('/api/check-status', async (req, res) => {
                     specificCount: specificEmail.openCount,
                     specificHistory: specificEmail.openHistory
                 };
-                // If subject was missing in query, use the one from DB to find the rest of the thread
                 if (!subjectToSearch) subjectToSearch = specificEmail.subject;
             }
         }
 
-        // 2. NOW, Generate the Thread Breakdown using the Subject
+        // 2. Thread Breakdown Logic
         if (subjectToSearch) {
-            const emails = await TrackedEmail.find({ subject: subjectToSearch }).sort({ createdAt: 1 });
+            // Find ALL emails in thread, sort by NEWEST first
+            const emails = await TrackedEmail.find({ subject: subjectToSearch }).sort({ createdAt: -1 });
             
             if (emails.length > 0) {
-                const totalOpens = emails.reduce((acc, email) => acc + email.openCount, 0);
+                const latestEmail = emails[0]; 
                 
-                // CREATE BREAKDOWN LIST
-                const threadBreakdown = emails.map((email, index) => ({
-                    index: index + 1,
-                    date: email.createdAt,
-                    openCount: email.openCount,
-                    isReply: index > 0 // First email is Original
-                }));
+                // Sort oldest to newest for the list
+                const sortedHistory = [...emails].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                
+                const threadBreakdown = sortedHistory.map((email, index) => {
+                    // Extract Last Read Time
+                    let lastReadTime = null;
+                    if (email.openHistory && email.openHistory.length > 0) {
+                        // Get the last item in the history array
+                        lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
+                    }
 
-                // Merge with existing response data
+                    return {
+                        index: index + 1,
+                        date: email.createdAt, // Sent Date
+                        openCount: email.openCount,
+                        isReply: index > 0,
+                        lastRead: lastReadTime // <--- NEW FIELD
+                    };
+                });
+
                 responseData = {
                     ...responseData,
                     found: true,
-                    opened: totalOpens > 0,
-                    openCount: totalOpens,
-                    threadBreakdown: threadBreakdown // <--- ALWAYS SEND THIS
+                    opened: responseData.specificFound ? responseData.specificOpened : latestEmail.opened,
+                    openCount: responseData.specificFound ? responseData.specificCount : latestEmail.openCount,
+                    threadBreakdown: threadBreakdown
                 };
             }
         }
