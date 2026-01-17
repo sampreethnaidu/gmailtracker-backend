@@ -1,4 +1,4 @@
-/* server.js - Version 18.0: Read Timestamps & Priority Logic */
+/* server.js - Version 19.0: Smart Thread Grouping (Ignore Re/Fwd) */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -180,7 +180,16 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// --- CHECK STATUS (UPDATED: SEND LAST READ TIME) ---
+// --- HELPER: Clean Subject (Remove Re:, Fwd:, etc.) ---
+function getCleanSubjectRegex(subject) {
+    if (!subject) return null;
+    // Remove "Re:", "Fwd:", "re:", etc. and trim spaces
+    const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
+    // Return Regex: Matches "Subject", "Re: Subject", "Fwd: Subject"
+    return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${clean}$`, 'i');
+}
+
+// --- CHECK STATUS (UPDATED: SMART THREAD GROUPING) ---
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
@@ -202,31 +211,33 @@ app.get('/api/check-status', async (req, res) => {
             }
         }
 
-        // 2. Thread Breakdown Logic
+        // 2. Thread Breakdown (With Regex Search)
         if (subjectToSearch) {
-            // Find ALL emails in thread, sort by NEWEST first
-            const emails = await TrackedEmail.find({ subject: subjectToSearch }).sort({ createdAt: -1 });
+            // NEW: Create Regex to ignore Re/Fwd prefixes
+            const subjectRegex = getCleanSubjectRegex(subjectToSearch);
+            
+            // Search using Regex instead of exact match
+            const emails = await TrackedEmail.find({ subject: { $regex: subjectRegex } }).sort({ createdAt: -1 });
             
             if (emails.length > 0) {
                 const latestEmail = emails[0]; 
                 
-                // Sort oldest to newest for the list
+                // Sort oldest to newest for breakdown
                 const sortedHistory = [...emails].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
                 
                 const threadBreakdown = sortedHistory.map((email, index) => {
-                    // Extract Last Read Time
                     let lastReadTime = null;
                     if (email.openHistory && email.openHistory.length > 0) {
-                        // Get the last item in the history array
                         lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
                     }
 
                     return {
                         index: index + 1,
-                        date: email.createdAt, // Sent Date
+                        date: email.createdAt,
                         openCount: email.openCount,
-                        isReply: index > 0,
-                        lastRead: lastReadTime // <--- NEW FIELD
+                        // If Subject contains "Re:" or it's not the first one, mark as reply
+                        isReply: index > 0 || /^(Re|re):/i.test(email.subject), 
+                        lastRead: lastReadTime
                     };
                 });
 
