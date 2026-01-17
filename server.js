@@ -1,4 +1,4 @@
-/* server.js - Version 22.0: Hybrid Search & Fast Sessions */
+/* server.js - Version 23.0: Explicit Labeling + Norm Subject */
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -126,7 +126,7 @@ app.post('/api/track/generate', async (req, res) => {
     } catch (error) { res.status(500).json({ error: 'Error generating ID' }); }
 });
 
-// 2. Serve Pixel (UPDATED: 30 Second Session Lock)
+// 2. Serve Pixel (30s Session)
 app.get('/api/track-image/:id', async (req, res) => {
     try {
         const trackingId = req.params.id;
@@ -144,15 +144,12 @@ app.get('/api/track-image/:id', async (req, res) => {
                 const now = new Date();
                 let shouldCount = true;
 
-                // --- 30 SECOND SESSION LOCK (Anti-Flicker) ---
                 if (email.openHistory && email.openHistory.length > 0) {
                     const lastOpen = email.openHistory[email.openHistory.length - 1];
                     const timeDiffSeconds = (now - new Date(lastOpen.timestamp)) / 1000;
-                    
-                    // If same IP and less than 30 seconds, IGNORE
                     if (lastOpen.ip === ip && timeDiffSeconds < 30) {
                         shouldCount = false;
-                        console.log(`🔒 Debounce: Ignored (Re-opened in ${timeDiffSeconds.toFixed(1)}s)`);
+                        console.log(`🔒 Debounce: Ignored (${timeDiffSeconds.toFixed(1)}s)`);
                     }
                 }
 
@@ -162,7 +159,6 @@ app.get('/api/track-image/:id', async (req, res) => {
                     email.openHistory.push({ timestamp: now, ip: ip, userAgent: userAgent });
                     email.lastOpenedAt = now;
                     await email.save();
-                    console.log(`✅ Counted! Total: ${email.openCount}`);
                 }
             }
         } 
@@ -173,31 +169,33 @@ app.get('/api/track-image/:id', async (req, res) => {
     } catch (error) { res.status(500).send('Error'); }
 });
 
-// Helper Regex
-function getCleanSubjectRegex(subject) {
+// Helper: Normalized Subject Matcher
+function getNormalizedSubjectRegex(subject) {
     if (!subject) return null;
+    // Remove Re/Fwd prefixes and trim
     const clean = subject.replace(/^(Re|Fwd|FW|re|fwd|Aw):\s*/i, "").trim();
-    return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${clean}$`, 'i');
+    // Escape special chars for Regex
+    const escaped = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Match optional prefixes + clean subject
+    return new RegExp(`^((Re|Fwd|FW|re|fwd|Aw):\\s*)*${escaped}$`, 'i');
 }
 
-// 3. Check Status (UPDATED: Hybrid Search - ID + Subject)
+// 3. Check Status (Fixing Missing Replies)
 app.get('/api/check-status', async (req, res) => {
     try {
         const { subject, trackingId } = req.query;
         let responseData = { found: false };
         let finalEmails = [];
 
-        // STRATEGY: Hybrid Search (Merge ID Families + Subject Orphans)
-        
         let familyEmails = [];
         let subjectEmails = [];
         let targetSubject = subject;
 
-        // 1. Get Family Tree (If ID provided)
+        // 1. Get Family Tree
         if (trackingId) {
             const target = await TrackedEmail.findOne({ trackingId });
             if (target) {
-                targetSubject = target.subject; // Update subject for fallback search
+                targetSubject = target.subject; 
                 const rootId = target.parentId || target.trackingId;
                 familyEmails = await TrackedEmail.find({ 
                     $or: [ { trackingId: rootId }, { parentId: rootId } ]
@@ -205,43 +203,48 @@ app.get('/api/check-status', async (req, res) => {
             }
         }
 
-        // 2. Get Subject Matches (The Safety Net)
+        // 2. Get Subject Matches
         if (targetSubject) {
-            const subjectRegex = getCleanSubjectRegex(targetSubject);
+            const subjectRegex = getNormalizedSubjectRegex(targetSubject);
             subjectEmails = await TrackedEmail.find({ subject: { $regex: subjectRegex } });
         }
 
-        // 3. MERGE & DEDUPLICATE (The "Hybrid" Fix)
+        // 3. Merge
         const emailMap = new Map();
-        
-        // Add Family First (Highest Confidence)
         familyEmails.forEach(e => emailMap.set(e.trackingId, e));
-        
-        // Add Subject Matches (Only if recipients roughly match to avoid pollution)
-        // Note: For now, we add all subject matches to ensure the "Reply" is caught even if ID Link failed
         subjectEmails.forEach(e => {
-            if (!emailMap.has(e.trackingId)) {
-                emailMap.set(e.trackingId, e);
-            }
+            if (!emailMap.has(e.trackingId)) emailMap.set(e.trackingId, e);
         });
 
-        // Convert back to array and sort by Date
+        // Sort by Date
         finalEmails = Array.from(emailMap.values()).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
         if (finalEmails.length > 0) {
-            // GENERATE BREAKDOWN
-            const threadBreakdown = finalEmails.map((email, index) => ({
-                index: index + 1,
-                date: email.createdAt,
-                openCount: email.openCount,
-                isReply: !!email.parentId || index > 0, 
-                lastRead: email.openHistory.length > 0 ? email.openHistory[email.openHistory.length-1].timestamp : null
-            }));
+            const threadBreakdown = finalEmails.map((email, index) => {
+                // EXPLICIT LABELING LOGIC
+                let type = "Original";
+                const s = email.subject.toLowerCase();
+                
+                if (index > 0) type = "Reply"; // Default assumption
+                if (s.startsWith("fwd:") || s.startsWith("fw:")) type = "Forward";
+                else if (s.startsWith("re:") || s.startsWith("aw:")) type = "Reply";
+                
+                let lastReadTime = null;
+                if (email.openHistory && email.openHistory.length > 0) {
+                    lastReadTime = email.openHistory[email.openHistory.length - 1].timestamp;
+                }
 
-            // SIGMA TOTAL
+                return {
+                    index: index + 1,
+                    date: email.createdAt,
+                    openCount: email.openCount,
+                    isReply: type === "Reply",
+                    type: type, // NEW: Explicit Type
+                    lastRead: lastReadTime
+                };
+            });
+
             const totalOpens = finalEmails.reduce((acc, email) => acc + email.openCount, 0);
-            
-            // LATEST STATUS (Newest Email)
             const latest = finalEmails[finalEmails.length - 1];
 
             responseData = {
